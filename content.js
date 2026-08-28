@@ -224,17 +224,19 @@ class KatexGPT {
       unsupportedAttrs.forEach((attr) => el.removeAttribute(attr));
     }
 
-    // Drop invisible control operators (function application, invisible times,
-    // separator and plus). They carry no meaning for Word, can render as
-    // garbage boxes, and KaTeX emits them inside <msub>/<msup>, which makes
-    // those elements invalid by giving them a third child.
-    const invisibleOps = ["⁡", "⁢", "⁣", "⁤"];
+    // Drop invisible control operators unless an invisible-times operator is
+    // correctly placed in an <mrow>. KaTeX can emit controls inside fixed-arity
+    // elements such as <msub>/<msup>, where they become an invalid extra child.
+    const invisibleOps = ["\u2061", "\u2062", "\u2063", "\u2064"];
 
     // Replace prime entities (′, ″, ‴) with simple apostrophes
     const moElements = xmlDoc.getElementsByTagName("mo");
     for (let mo of Array.from(moElements)) {
       const content = mo.textContent.trim();
-      if (invisibleOps.includes(content)) {
+      if (
+        invisibleOps.includes(content) &&
+        !(content === "\u2062" && mo.parentNode?.nodeName === "mrow")
+      ) {
         mo.parentNode?.removeChild(mo);
         continue;
       }
@@ -545,6 +547,93 @@ class KatexGPT {
     });
   }
 
+  addInvisibleTimes(xmlDoc) {
+    const mathNS = "http://www.w3.org/1998/Math/MathML";
+    const scripted = new Set([
+      "msub", "msup", "msubsup", "mover", "munder", "munderover",
+    ]);
+    const fixedArity = new Set([
+      ...scripted, "mfrac", "mroot",
+    ]);
+    const isFactor = (node) => {
+      if (node.nodeName === "mi" || node.nodeName === "mn") return true;
+      if (["mfrac", "msqrt", "mroot", "mtable"].includes(node.nodeName)) return true;
+      if (!scripted.has(node.nodeName)) return false;
+      const base = Array.from(node.childNodes).find(
+        (child) => child.nodeType === Node.ELEMENT_NODE
+      );
+      return base ? isFactor(base) : false;
+    };
+
+    Array.from(xmlDoc.getElementsByTagName("mrow")).forEach((mrow) => {
+      if (fixedArity.has(mrow.parentNode?.nodeName)) return;
+      const children = Array.from(mrow.childNodes).filter(
+        (node) => node.nodeType === Node.ELEMENT_NODE
+      );
+
+      for (let i = 1; i < children.length; i++) {
+        const left = children[i - 1];
+        const right = children[i];
+        if (!isFactor(left) || !isFactor(right)) continue;
+        if (
+          left.nodeName === "mi" && right.nodeName === "mi" &&
+          left.getAttribute("mathvariant") === "normal" &&
+          right.getAttribute("mathvariant") === "normal"
+        ) continue;
+        const times = xmlDoc.createElementNS(mathNS, "mo");
+        times.textContent = "\u2062";
+        mrow.insertBefore(times, right);
+      }
+    });
+  }
+
+  groupDelimitedComponents(xmlDoc) {
+    const mathNS = "http://www.w3.org/1998/Math/MathML";
+    const opening = "([{";
+    const closing = ")]}";
+    const rows = Array.from(xmlDoc.getElementsByTagName("mrow"));
+
+    for (let rowIndex = 0; rowIndex < rows.length; rowIndex++) {
+      const mrow = rows[rowIndex];
+      const children = Array.from(mrow.childNodes).filter(
+        (node) => node.nodeType === Node.ELEMENT_NODE
+      );
+      let depth = 0;
+      let start = 0;
+      let sawComma = false;
+      const groupUntil = (end) => {
+        const component = children.slice(start, end);
+        if (component.length > 1) {
+          const group = xmlDoc.createElementNS(mathNS, "mrow");
+          mrow.insertBefore(group, component[0]);
+          component.forEach((child) => group.appendChild(child));
+          rows.push(group);
+        }
+        start = end + 1;
+      };
+
+      children.forEach((child, index) => {
+        const value = child.textContent.trim();
+        if (child.nodeName === "mo" && opening.includes(value)) {
+          if (depth++ === 0) {
+            start = index + 1;
+            sawComma = false;
+          }
+        } else if (child.nodeName === "mo" && closing.includes(value)) {
+          if (depth === 1 && sawComma) groupUntil(index);
+          if (depth > 0) depth--;
+        } else if (
+          depth === 1 &&
+          ((child.nodeName === "mo" && value === ",") ||
+            (child.nodeName === "mtext" && value.startsWith(",")))
+        ) {
+          sawComma = true;
+          groupUntil(index);
+        }
+      });
+    }
+  }
+
   // Turns one rendered equation into Word-ready MathML, or null if the source
   // cannot be resolved. Every copy path goes through here.
   buildMathMLFor(equation) {
@@ -589,6 +678,8 @@ class KatexGPT {
       return null;
     }
     this.optimizeFencedMrows(xmlDoc);
+    this.addInvisibleTimes(xmlDoc);
+    this.groupDelimitedComponents(xmlDoc);
     return this.sanitizeMathMLForWord(
       new XMLSerializer().serializeToString(xmlDoc)
     );

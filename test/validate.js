@@ -1,6 +1,6 @@
 // Checks the MathML the extension puts on the clipboard is well-formed enough
 // for Word: correct arity on script/fraction elements, no leftover KaTeX
-// annotation cruft, no invisible control operators, single <math> root.
+// annotation cruft, only valid invisible-times operators, single <math> root.
 //
 // Run:  node test/collector.js  (then load test/harness.html and POST results)
 //       node test/validate.js
@@ -10,7 +10,7 @@ const ARITY = {
   msub: 2, msup: 2, mfrac: 2, mroot: 2, munder: 2, mover: 2,
   msubsup: 3, munderover: 3,
 };
-const INVISIBLE = /[⁡⁢⁣⁤]/;
+const UNSUPPORTED_INVISIBLE = /[⁡⁣⁤]/;
 
 function scan(xml) {
   const problems = [];
@@ -30,7 +30,12 @@ function scan(xml) {
     }
   }
   if (/<(semantics|annotation)/.test(xml)) problems.push("leftover <semantics>/<annotation>");
-  if (INVISIBLE.test(xml)) problems.push("invisible control operator present");
+  if (UNSUPPORTED_INVISIBLE.test(xml)) problems.push("unsupported invisible control operator present");
+  const withoutValidTimes = xml.replace(/<mo(?:\s[^>]*)?>⁢<\/mo>/g, "");
+  if (withoutValidTimes.includes("⁢")) problems.push("invalid invisible-times operator");
+  if (/<mi[^>]*mathvariant="normal"[^>]*>[^<]*<\/mi><mo>⁢<\/mo><mi[^>]*mathvariant="normal"/.test(xml)) {
+    problems.push("roman label split into multiplication");
+  }
   if ((xml.match(/<math[\s>]/g) || []).length !== 1) problems.push("not exactly one <math> root");
   if (!/^<math[\s>]/.test(xml.trim())) problems.push("does not start at <math> (wrapper leaked)");
   // Non-breaking spaces are required, not a defect: Word collapses ordinary
@@ -55,6 +60,15 @@ for (const shape of Object.keys(results)) {
     }
     checked++;
     const p = scan(c.out);
+    if (c.name === "scalarVector" && (c.out.match(/⁢/g) || []).length !== 3) {
+      p.push("scalar-vector products need three invisible-times operators");
+    }
+    if (
+      c.name === "scalarVector" &&
+      (c.out.match(/<mrow><mi>k<\/mi><mo>⁢<\/mo><msub>/g) || []).length !== 2
+    ) {
+      p.push("vector components need separate mrow groups");
+    }
     if (p.length) { rows.push(`  ${c.name.padEnd(11)} FAIL ${p.join("; ")}`); failed++; }
   }
   const bad = rows.filter((r) => /FAIL|ERROR|NO OUTPUT/.test(r));
