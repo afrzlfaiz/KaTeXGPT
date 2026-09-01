@@ -362,22 +362,10 @@ class KatexGPT {
   }
 
   handleLatexCopy(equation, delimiter) {
-    let latex = this.getTexSource(equation);
+    const latex = this.getTexSource(equation);
 
     if (latex) {
-      let formattedLatex = latex;
-      switch (delimiter) {
-        case "brackets":
-          formattedLatex = `\\[${latex}\\]`;
-          break;
-        case "doubledollar":
-          formattedLatex = `$$${latex}$$`;
-          break;
-        case "dollar":
-        default:
-          formattedLatex = `$${latex}$`;
-          break;
-      }
+      const formattedLatex = this.formatLatexForCopy(latex, delimiter);
 
       console.log("📋 Copying LaTeX to clipboard:", formattedLatex);
       this.copyToClipboard(formattedLatex)
@@ -393,19 +381,7 @@ class KatexGPT {
       // Try to recover via heuristic if direct source failed
       const recoveredTex = this.extractTexFromKatexHtml(equation);
       if (recoveredTex) {
-        let formattedLatex = recoveredTex;
-        switch (delimiter) {
-          case "brackets":
-            formattedLatex = `\\[${recoveredTex}\\]`;
-            break;
-          case "doubledollar":
-            formattedLatex = `$$${recoveredTex}$$`;
-            break;
-          case "dollar":
-          default:
-            formattedLatex = `$${recoveredTex}$`;
-            break;
-        }
+        const formattedLatex = this.formatLatexForCopy(recoveredTex, delimiter);
         console.log("📋 Copying recovered LaTeX to clipboard:", formattedLatex);
         this.copyToClipboard(formattedLatex)
           .then(() => {
@@ -419,6 +395,21 @@ class KatexGPT {
         this.handleMathmlCopy(equation);
       }
     }
+  }
+
+  formatLatexForCopy(latex, delimiter) {
+    const source = latex
+      .trim()
+      .replace(/^\$\$([\s\S]*)\$\$$/, "$1")
+      .replace(/^\\\[([\s\S]*)\\\]$/, "$1")
+      .replace(/^\$([\s\S]*)\$$/, "$1")
+      .trim()
+      .replace(/\s*\n\s*/g, " ")
+      .replace(/\\frac\s*(\d)\s*(\d)/g, "\\frac{$1}{$2}");
+
+    if (delimiter === "brackets") return `\\[${source}\\]`;
+    if (delimiter === "doubledollar") return `$$${source}$$`;
+    return `$${source}$`;
   }
 
   extractTexFromKatexHtml(root) {
@@ -558,6 +549,10 @@ class KatexGPT {
     const isFactor = (node) => {
       if (node.nodeName === "mi" || node.nodeName === "mn") return true;
       if (["mfrac", "msqrt", "mroot", "mtable"].includes(node.nodeName)) return true;
+      if (
+        node.nodeName === "mrow" &&
+        Array.from(node.children).some((child) => child.nodeName === "mtable")
+      ) return true;
       if (!scripted.has(node.nodeName)) return false;
       const base = Array.from(node.childNodes).find(
         (child) => child.nodeType === Node.ELEMENT_NODE
@@ -634,6 +629,48 @@ class KatexGPT {
     }
   }
 
+  flattenTaggedEquationTables(xmlDoc) {
+    const mathNS = "http://www.w3.org/1998/Math/MathML";
+
+    Array.from(xmlDoc.getElementsByTagName("mtable")).forEach((table) => {
+      if (table.getAttribute("width") !== "100%") return;
+      const rows = Array.from(table.children).filter((child) => child.nodeName === "mtr");
+      const cells = rows.length === 1
+        ? Array.from(rows[0].children).filter((child) => child.nodeName === "mtd")
+        : [];
+      if (
+        cells.length !== 4 ||
+        cells[0].textContent.trim() ||
+        cells[2].textContent.trim()
+      ) return;
+
+      const equation = cells[1].firstElementChild;
+      const tag = cells[3].firstElementChild;
+      if (!equation || tag?.nodeName !== "mtext" || !tag.textContent.trim()) return;
+
+      const flat = xmlDoc.createElementNS(mathNS, "mrow");
+      flat.appendChild(equation);
+      tag.textContent = "#" + tag.textContent.trim();
+      flat.appendChild(tag);
+      table.parentNode?.replaceChild(flat, table);
+    });
+  }
+
+  normalizeVerticalBars(xmlDoc) {
+    const mathNS = "http://www.w3.org/1998/Math/MathML";
+
+    Array.from(xmlDoc.getElementsByTagName("mi")).forEach((identifier) => {
+      if (
+        identifier.getAttribute("mathvariant") !== "normal" ||
+        !["|", "∣"].includes(identifier.textContent.trim())
+      ) return;
+      const operator = xmlDoc.createElementNS(mathNS, "mo");
+      operator.setAttribute("stretchy", "false");
+      operator.textContent = identifier.textContent;
+      identifier.parentNode?.replaceChild(operator, identifier);
+    });
+  }
+
   // Turns one rendered equation into Word-ready MathML, or null if the source
   // cannot be resolved. Every copy path goes through here.
   buildMathMLFor(equation) {
@@ -660,7 +697,10 @@ class KatexGPT {
       try {
         mathMLString = this.stripKatexSpan(
           katex
-            .renderToString(tex, { output: "mathml" })
+            .renderToString(tex, {
+              output: "mathml",
+              displayMode: !!equation.closest(".katex-display"),
+            })
             .replaceAll("&nbsp;", " ")
         );
       } catch (e) {
@@ -677,6 +717,8 @@ class KatexGPT {
       console.error("MathML did not parse as XML");
       return null;
     }
+    this.flattenTaggedEquationTables(xmlDoc);
+    this.normalizeVerticalBars(xmlDoc);
     this.optimizeFencedMrows(xmlDoc);
     this.addInvisibleTimes(xmlDoc);
     this.groupDelimitedComponents(xmlDoc);

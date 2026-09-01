@@ -30,6 +30,10 @@ function scan(xml) {
     }
   }
   if (/<(semantics|annotation)/.test(xml)) problems.push("leftover <semantics>/<annotation>");
+  if (/<mtable[^>]*width="100%"/.test(xml)) problems.push("tagged equation still uses full-width table");
+  if (/<mi[^>]*mathvariant="normal"[^>]*>[|∣]<\/mi>/.test(xml)) {
+    problems.push("vertical bar left as an identifier");
+  }
   if (UNSUPPORTED_INVISIBLE.test(xml)) problems.push("unsupported invisible control operator present");
   const withoutValidTimes = xml.replace(/<mo(?:\s[^>]*)?>⁢<\/mo>/g, "");
   if (withoutValidTimes.includes("⁢")) problems.push("invalid invisible-times operator");
@@ -68,6 +72,27 @@ for (const shape of Object.keys(results)) {
       (c.out.match(/<mrow><mi>k<\/mi><mo>⁢<\/mo><msub>/g) || []).length !== 2
     ) {
       p.push("vector components need separate mrow groups");
+    }
+    if (
+      shape !== "bare" &&
+      c.name === "tagged" &&
+      !c.out.includes("<mtext>#(2.8)</mtext>")
+    ) {
+      p.push("equation tag is not Word's #(number) form");
+    }
+    if (
+      shape !== "bare" &&
+      c.name === "absolute" &&
+      (c.out.match(/<mo stretchy="false">∣<\/mo>/g) || []).length !== 2
+    ) {
+      p.push("absolute-value bars are not Word-compatible operators");
+    }
+    if (
+      shape !== "bare" &&
+      c.name === "scalarMatrix" &&
+      !/<\/mfrac><mo>⁢<\/mo><mrow><mo fence="true">\(</.test(c.out)
+    ) {
+      p.push("scalar and matrix need an invisible-times operator");
     }
     if (p.length) { rows.push(`  ${c.name.padEnd(11)} FAIL ${p.join("; ")}`); failed++; }
   }
